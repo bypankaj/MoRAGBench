@@ -119,6 +119,19 @@ def push_dir_files(local_dir: str, remote_dir: str):
         if os.path.isfile(src):
             adb_push_files(src, remote_dir)
 
+def remote_dir_has_files(remote_dir: str) -> bool:
+    # just checking if this folder is already on the phone and has stuff in it
+    check_cmd = f"[ -d '{remote_dir}' ] && [ \"$(ls -A '{remote_dir}' 2>/dev/null)\" ] && echo NONEMPTY || echo EMPTY"
+    result = run(ADB + ["shell", check_cmd])
+    return result.strip() == "NONEMPTY"
+
+def push_dir_files_if_missing(local_dir: str, remote_dir: str, label: str):
+    # don't bother pushing again if it's already there from before
+    if remote_dir_has_files(remote_dir):
+        print(f"Skipping push for {label}, already exists on device")
+    else:
+        push_dir_files(local_dir, remote_dir)
+
 def start_benchmark(test_type: TestType, resume: bool = False):
     payload = {"test_type": test_type.value, "resume": resume}
     r = requests.post(
@@ -199,10 +212,17 @@ def main(args):
         llm_name = f"{bench_model.rag_pipeline.llm.model_name.value}_{bench_model.rag_pipeline.llm.dtype.value}"
         embed_name = f"{bench_model.rag_pipeline.embedding.model_name.value}_{bench_model.rag_pipeline.embedding.dtype.value}"
 
+        # just the dataset name isn't enough here, limit/corpus_limit/sampling/seed
+        # can all change what's actually inside even if the name stays the same,
+        # so throwing those into the folder name too so it doesn't mix things up
+        dt = bench_model.downstream_task
+        task_variant = f"{dt.sampling_method.value}_{dt.limit}_{dt.corpus_limit}_{dt.seed}"
+        remote_task_name = f"{task_name}_{task_variant}"
+
         dirs_to_create = [
             TASK_DIR,
             f"{TASK_DIR}/downstream_task",
-            f"{TASK_DIR}/downstream_task/{task_name}",
+            f"{TASK_DIR}/downstream_task/{remote_task_name}",
             f"{TASK_DIR}/llm",
             f"{TASK_DIR}/llm/{llm_name}",
             f"{TASK_DIR}/embedding",
@@ -221,18 +241,22 @@ def main(args):
         parse_embedding(bench_model.rag_pipeline.embedding, bench_model.hf_token, EMBEDDING_DIR)
 
         print("\n==== Moving Files to Server ====\n")
-        push_dir_files(
+        push_dir_files_if_missing(
             f"{DOWNSTREAM_TASK_DIR}/{task_name}",
-            f"{SERVER_BASE}/{TASK_DIR}/downstream_task/{task_name}",
+            f"{SERVER_BASE}/{TASK_DIR}/downstream_task/{remote_task_name}",
+            f"downstream_task/{remote_task_name}",
         )
-        push_dir_files(
+        push_dir_files_if_missing(
             f"{LLM_DIR}/{llm_name}",
             f"{SERVER_BASE}/{TASK_DIR}/llm/{llm_name}",
+            f"llm/{llm_name}",
         )
-        push_dir_files(
+        push_dir_files_if_missing(
             f"{EMBEDDING_DIR}/{embed_name}",
             f"{SERVER_BASE}/{TASK_DIR}/embedding/{embed_name}",
+            f"embedding/{embed_name}",
         )
+        # config changes every run anyway so just always send it fresh
         adb_push_files(f"{CLIENT_BASE}/{TASK_CONFIG_PATH}", f"{SERVER_BASE}/{TASK_CONFIG_PATH}")
     else:
         dataset_name = bench_model.ann_dataset.name.value
